@@ -1,0 +1,345 @@
+# Build, test, scan and publish the torproxy image.
+#
+# Pull requests: build both platforms on native runners, smoke-test with a live
+# Tor bootstrap, scan, and apply the vulnerability gate. Nothing is pushed.
+#
+# Main branch (push, weekly schedule, manual run): the same, from a fresh
+# no-cache build. Each platform is pushed by digest only (no tag), tested and
+# scanned as pulled from the registry. Then the publish job creates the index,
+# signs it keylessly, attests each platform's SBOM and vulnerability report,
+# adds build provenance, verifies all of it the way a consumer would, and only
+# then moves the tags: latest, arti-<version>, <YYYY-MM-DD>, sha-<commit>.
+name: build
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+    paths-ignore: ["**.md"]
+  schedule:
+    # Weekly rebuild to pick up fixes in the Chainguard base and build images.
+    - cron: "23 5 * * 1"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PUBLISH: ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' }}
+  HADOLINT_IMAGE: ghcr.io/hadolint/hadolint:v2.15.1@sha256:32dac94127fd60b7b7e3fbfc65e1383b9b5e25c9bfd7b8536de7a539fe68a12d
+  GO_IMAGE: cgr.dev/chainguard/go:latest
+  ACTIONLINT_VERSION: v1.7.12
+  ZIZMOR_VERSION: 1.32.0
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read # checkout
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: hadolint
+        run: docker run --rm -i "$HADOLINT_IMAGE" hadolint - < Dockerfile
+
+      - name: shellcheck
+        run: shellcheck -S warning ci/*.sh scripts/*.sh
+
+      - name: Healthcheck vet and tests
+        run: >-
+          docker run --rm -v "$PWD/healthcheck:/src" -w /src --entrypoint /bin/sh "$GO_IMAGE"
+          -c 'go vet ./... && go test ./...'
+
+      - name: actionlint
+        run: >-
+          docker run --rm -v "$PWD:/repo" -w /repo --entrypoint /bin/sh "$GO_IMAGE"
+          -c "go run github.com/rhysd/actionlint/cmd/actionlint@${ACTIONLINT_VERSION}"
+
+      - name: zizmor
+        run: pipx run "zizmor==${ZIZMOR_VERSION}" --offline --persona pedantic .github/workflows
+
+  build:
+    name: Build ${{ matrix.arch }}
+    needs: lint
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 75
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: amd64
+            runner: ubuntu-24.04
+          # GitHub-hosted arm64 runner. For a private repository whose plan has
+          # no arm64 runners, remove this entry (the image is then amd64-only).
+          - arch: arm64
+            runner: ubuntu-24.04-arm
+    permissions:
+      contents: read # checkout
+      packages: write # push platform images by digest (main branch only)
+      security-events: write # upload SARIF to code scanning
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Image name
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Log in to GHCR
+        if: env.PUBLISH == 'true'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # Main branch: fresh build (no cache read), pushed by digest only. The
+      # cache is written so pull-request builds start warm.
+      - name: Build and push by digest
+        id: push
+        if: env.PUBLISH == 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          pull: true
+          no-cache: true
+          provenance: false
+          sbom: false
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          cache-to: type=gha,mode=max,scope=build-${{ matrix.arch }}
+          outputs: type=image,name=${{ steps.name.outputs.image }},push-by-digest=true,name-canonical=true,push=true
+
+      - name: Build (pull request, not pushed)
+        if: env.PUBLISH != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/${{ matrix.arch }}
+          pull: true
+          provenance: false
+          sbom: false
+          cache-from: type=gha,scope=build-${{ matrix.arch }}
+          load: true
+          tags: torproxy:ci
+
+      # On main, everything below tests the image exactly as pushed.
+      - name: Select image under test
+        id: under-test
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+        run: |
+          if [ "$PUBLISH" = true ]; then
+            docker pull "$IMAGE@$DIGEST"
+            echo "ref=$IMAGE@$DIGEST" >> "$GITHUB_OUTPUT"
+          else
+            echo "ref=torproxy:ci" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Smoke test (live Tor bootstrap)
+        env:
+          REF: ${{ steps.under-test.outputs.ref }}
+          REQUIRE_TOR: "1"
+        run: ci/smoke-test.sh "$REF"
+
+      - name: Scan
+        id: scan
+        if: ${{ !cancelled() && steps.under-test.outcome == 'success' }}
+        env:
+          REF: ${{ steps.under-test.outputs.ref }}
+          DIGEST: ${{ steps.push.outputs.digest }}
+          ARCH: ${{ matrix.arch }}
+        run: |
+          ci/scan.sh "$REF" scan
+          echo "$ARCH" > scan/platform
+          if [ -n "$DIGEST" ]; then echo "$DIGEST" > scan/digest; fi
+
+      - name: Vulnerability gate
+        id: gate
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
+        continue-on-error: true
+        run: ci/gate.sh scan
+
+      - name: Job summary
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
+        env:
+          ARCH: ${{ matrix.arch }}
+          REF: ${{ steps.under-test.outputs.ref }}
+        run: |
+          {
+            echo "## linux/$ARCH"
+            echo
+            echo "Image: \`$REF\`"
+            echo
+            cat scan/summary.md
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Reporting only (the SARIF is also in the artifact): a private repository
+      # without code scanning would otherwise fail the job here.
+      - name: Upload Trivy results to code scanning
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          sarif_file: scan/trivy.sarif
+          category: trivy-${{ matrix.arch }}
+
+      # Reporting only (the SARIF is also in the artifact): a private repository
+      # without code scanning would otherwise fail the job here.
+      - name: Upload Grype results to code scanning
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) }}
+        continue-on-error: true
+        uses: github/codeql-action/upload-sarif@1bd86f2fdb4b86187fa4059f16f31a3202acc9ea # v4.39.4
+        with:
+          sarif_file: scan/grype.sarif
+          category: grype-${{ matrix.arch }}
+
+      - name: Upload scans and SBOMs
+        if: ${{ !cancelled() && steps.scan.outcome == 'success' }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-${{ matrix.arch }}
+          path: scan/
+          if-no-files-found: error
+          retention-days: 90
+
+      - name: Enforce vulnerability gate
+        if: ${{ !cancelled() && steps.gate.outcome == 'failure' }}
+        run: |
+          echo "::error::Fixable HIGH/CRITICAL findings; see the job summary. Waivers go in ci/allowlist.txt."
+          exit 1
+
+  publish:
+    name: Sign, attest and publish
+    needs: build
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read # checkout
+      packages: write # create the index, push signatures and attestations, move tags
+      id-token: write # keyless signing and provenance (Sigstore via GitHub OIDC)
+      attestations: write # GitHub build provenance
+    steps:
+      - uses: step-security/harden-runner@aebdcf6156ab6691adf63218240e476564a1ed4c # v2.23.0
+        with:
+          egress-policy: audit
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Image name
+        id: name
+        run: echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: scan-*
+          path: scans
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: sigstore/cosign-installer@756fe2d284c7292c4e9b62c8a28f1e5629c59532 # v4.1.3
+        with:
+          cosign-release: v3.1.4
+
+      - name: Create the multi-platform index (candidate tag only)
+        id: index
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          SHA: ${{ github.sha }}
+          SOURCE: ${{ github.server_url }}/${{ github.repository }}
+        run: ci/publish.sh index
+
+      - name: Sign, and attest SBOM and vulnerability report per platform
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+        run: ci/publish.sh sign "$DIGEST"
+
+      - name: Build provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ steps.name.outputs.image }}
+          subject-digest: ${{ steps.index.outputs.digest }}
+          push-to-registry: true
+
+      # Verifies signature, SBOMs, vulnerability reports and provenance before
+      # any public tag moves, then checks every tag resolves to the signed digest.
+      - name: Verify and promote tags
+        id: promote
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+          SHA: ${{ github.sha }}
+          GH_TOKEN: ${{ github.token }}
+        run: ci/publish.sh promote "$DIGEST"
+
+      - name: Summary
+        if: ${{ !cancelled() }}
+        env:
+          IMAGE: ${{ steps.name.outputs.image }}
+          DIGEST: ${{ steps.index.outputs.digest }}
+          TAGS: ${{ steps.promote.outputs.tags }}
+        run: |
+          {
+            echo "## Published"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Image | \`$IMAGE\` |"
+            echo "| Index digest | \`$DIGEST\` |"
+            echo "| Tags | ${TAGS:-not promoted} |"
+            for dir in scans/scan-*; do
+              echo "| linux/$(cat "$dir/platform") | \`$(cat "$dir/digest")\` |"
+            done
+            echo
+            echo "Verify before deploying:"
+            echo
+            echo '```sh'
+            echo "scripts/verify-image.sh $IMAGE@$DIGEST"
+            echo '```'
+            echo
+            echo "## Pinned versions"
+            echo
+            echo '```'
+            scripts/bump-versions.sh 2>&1 || echo "version check failed (network?)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload verified attestations
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verified-attestations
+          path: verified/
+          if-no-files-found: warn
+          retention-days: 90

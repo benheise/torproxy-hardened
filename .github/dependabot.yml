@@ -1,0 +1,14 @@
+version: 2
+updates:
+  # Keeps the SHA-pinned actions current (Dependabot updates the pin and the
+  # version comment together). Arti, lyrebird and tool pins are reported by
+  # scripts/bump-versions.sh in each scheduled run's summary.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    cooldown:
+      default-days: 7
+    groups:
+      actions:
+        patterns: ["*"]

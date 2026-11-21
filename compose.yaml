@@ -1,0 +1,25 @@
+services:
+  torproxy:
+    image: torproxy:arti
+    build:
+      context: .
+    restart: unless-stopped
+    # Hardening: nothing in the image needs to write outside /var/lib/arti,
+    # needs a capability, or needs to gain privileges.
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    ports:
+      # Publish to loopback or a private interface only: anything that can
+      # reach this port can use your Tor client.
+      - "127.0.0.1:9050:9050"
+    volumes:
+      # Keeps guard selection and the directory cache across restarts.
+      - arti-data:/var/lib/arti
+      # Bridges (optional): see arti.toml for the file format.
+      # - ./bridges.toml:/etc/arti/arti.d/bridges.toml:ro
+
+volumes:
+  arti-data:

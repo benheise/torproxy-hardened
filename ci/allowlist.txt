@@ -1,0 +1,7 @@
+# Vulnerability gate waivers for ci/gate.sh.
+#
+# One per line:  ID  EXPIRY(YYYY-MM-DD)  reason
+#   CVE-2026-00000  2026-12-31  not reachable: function is never called; tracked in issue #N
+#
+# Use the scanner's ID (CVE, GHSA or GO-) or any alias Grype lists for it.
+# Entries stop applying after their expiry date, so every waiver is revisited.

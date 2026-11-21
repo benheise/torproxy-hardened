@@ -1,0 +1,23 @@
+# Arti Tor client: SOCKS5 proxy only.
+[proxy]
+socks_listen = "0.0.0.0:9050"
+
+[storage]
+cache_dir = "/var/lib/arti/cache"
+state_dir = "/var/lib/arti/state"
+# Default is under $HOME, which is read-only in this image.
+port_info_file = "/var/lib/arti/public/port_info.json"
+
+[logging]
+console = "info"
+
+# Bridges: mount a file such as /etc/arti/arti.d/bridges.toml containing
+#
+#   [bridges]
+#   enabled = true
+#   bridges = ["obfs4 192.0.2.10:443 FINGERPRINT cert=... iat-mode=0"]
+#
+#   [[bridges.transports]]
+#   protocols = ["obfs4", "webtunnel"]
+#   path = "/usr/bin/lyrebird"
+#   run_on_startup = false
