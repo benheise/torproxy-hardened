@@ -22,7 +22,7 @@ failures=0
 
 cleanup() {
   docker rm -f "$main" "$bridge" >/dev/null 2>&1 || true
-  docker volume rm "$vol" "$vol-br" >/dev/null 2>&1 || true
+  docker volume rm "$vol" "$vol-br" "$vol-cfg" >/dev/null 2>&1 || true
   rm -rf "$tmp"
 }
 trap cleanup EXIT
@@ -125,9 +125,18 @@ path = "/usr/bin/lyrebird"
 run_on_startup = false
 EOF
 chmod 0644 "$tmp/bridges.toml"
+# Arti only trusts config files owned by root or by its own user (65532); a
+# file created with sudoedit on the host is root-owned. A file made by this
+# script belongs to whoever runs it (UID 1001 on GitHub runners), so stream it
+# into a volume as a tar archive with owner 0:0. docker cp -a applies the
+# ownership (the image maps it to its user, 65532), no sudo needed.
+docker volume create "$vol-cfg" >/dev/null
+helper=$(docker create -v "$vol-cfg:/cfg" "$image")
+tar --owner=0 --group=0 --numeric-owner -C "$tmp" -cf - bridges.toml | docker cp -a - "$helper:/cfg/"
+docker rm "$helper" >/dev/null
 launched=0
 if ! docker run -d --name "$bridge" "${hardened[@]}" -v "$vol-br:/var/lib/arti" \
-  -v "$tmp/bridges.toml:/etc/arti/arti.d/bridges.toml:ro" "$image" >/dev/null; then
+  -v "$vol-cfg:/etc/arti/arti.d:ro" "$image" >/dev/null; then
   echo "bridge test container did not start"
 fi
 for _ in $(seq 1 30); do

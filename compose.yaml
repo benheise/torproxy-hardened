@@ -18,7 +18,9 @@ services:
     volumes:
       # Keeps guard selection and the directory cache across restarts.
       - arti-data:/var/lib/arti
-      # Bridges (optional): see arti.toml for the file format.
+      # Bridges (optional): see arti.toml for the file format. The file must be
+      # owned by root (sudo chown root:root bridges.toml) and mode 0644, or
+      # Arti exits with "Bad owner".
       # - ./bridges.toml:/etc/arti/arti.d/bridges.toml:ro
 
 volumes:

@@ -33,7 +33,7 @@ docker run -d --name torproxy --restart unless-stopped \
   -v arti-data:/var/lib/arti -p 127.0.0.1:9050:9050 ghcr.io/<owner>/<repo>:latest
 ```
 
-To build and run locally instead: `docker compose up -d` (uses `compose.yaml`).
+To build and run locally instead: `docker compose up -d` (uses `compose.yaml`). For a Portainer stack, paste `deploy/portainer-stack.yml` into the web editor and replace the digest.
 
 Point clients at `socks5h://127.0.0.1:9050`. Use the `socks5h` form (hostname sent to the proxy) so DNS resolution happens inside Tor. This image has no DNS port. A client that resolves names itself and hands the proxy an IP address leaks those lookups outside Tor.
 
@@ -59,10 +59,11 @@ run_on_startup = false
 ```
 
 ```sh
+sudo chown root:root bridges.toml && sudo chmod 0644 bridges.toml
 -v ./bridges.toml:/etc/arti/arti.d/bridges.toml:ro
 ```
 
-Arti starts lyrebird when a bridge needs it and stops it on shutdown.
+The file must be owned by root (or by UID 65532) and not writable by group or others. Arti refuses any other config file and exits with `Bad owner (UID …) on file or directory`, so a file you created as your normal user needs the `chown` above. Arti starts lyrebird when a bridge needs it and stops it on shutdown.
 
 ### Healthcheck
 
@@ -151,7 +152,7 @@ This checks the keyless signature on the index and each platform, the SBOM and v
 
 - Actions only needs the default read-only `GITHUB_TOKEN`; each job requests what it uses. The workflow sets `permissions: {}` and pins every action to a commit SHA, and Dependabot (`.github/dependabot.yml`) keeps those pins current with a 7-day cooldown.
 - The first publish creates a private GHCR package. Make it public in the package settings if you want anonymous pulls. It links to the repository through the `org.opencontainers.image.source` label.
-- `ubuntu-24.04-arm` runners are free for public repositories. For a private repository whose plan lacks them, remove the arm64 matrix entry.
+- `ubuntu-24.04-arm` runners are free on public repositories. On private repositories they have 2 vCPUs and use the plan's included Actions minutes.
 - Code scanning needs a public repository or GitHub Advanced Security. Without it the SARIF upload is skipped, and the SARIF is still in the artifact.
 - Require the `Lint`, `Build amd64` and `Build arm64` checks in branch protection for `main`.
 - GitHub disables scheduled workflows after 60 days without repository activity. Re-enable the workflow from the Actions tab if that happens.

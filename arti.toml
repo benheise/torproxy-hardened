@@ -11,7 +11,9 @@ port_info_file = "/var/lib/arti/public/port_info.json"
 [logging]
 console = "info"
 
-# Bridges: mount a file such as /etc/arti/arti.d/bridges.toml containing
+# Bridges: mount a file such as /etc/arti/arti.d/bridges.toml, owned by root
+# (or UID 65532) and not group/world-writable, or Arti exits with "Bad owner".
+# Contents:
 #
 #   [bridges]
 #   enabled = true

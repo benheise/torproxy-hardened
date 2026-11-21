@@ -80,8 +80,8 @@ jobs:
         include:
           - arch: amd64
             runner: ubuntu-24.04
-          # GitHub-hosted arm64 runner. For a private repository whose plan has
-          # no arm64 runners, remove this entry (the image is then amd64-only).
+          # GitHub-hosted arm64 runner: free on public repositories; on private
+          # repositories it has 2 vCPUs and uses the plan's included minutes.
           - arch: arm64
             runner: ubuntu-24.04-arm
     permissions:

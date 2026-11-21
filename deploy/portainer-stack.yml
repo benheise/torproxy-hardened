@@ -1,0 +1,56 @@
+# Portainer stack for torproxy (Raspberry Pi 5 or any arm64/amd64 Docker host).
+#
+# Portainer: Stacks > Add stack > name "torproxy" > Web editor > paste this >
+# replace the digest below > Deploy the stack.
+#
+# Update: verify the new digest (scripts/verify-image.sh), replace it here in
+# the stack's Editor tab, then Update the stack. Keep the previous digest for
+# rollback.
+services:
+  torproxy:
+    # The multi-platform index digest you verified. Docker picks the arm64 or
+    # amd64 image from it. Pinning a digest (not a tag) means Portainer can only
+    # ever run the exact image you checked.
+    image: ghcr.io/benheise/torproxy-hardened@sha256:REPLACE_WITH_VERIFIED_INDEX_DIGEST
+    container_name: torproxy
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 128
+    ports:
+      # Loopback: for clients running on this host outside Docker.
+      # LAN clients: use this host's LAN address instead of 127.0.0.1 and
+      # restrict the port at the firewall. Containers that join the
+      # "torproxy" network need no published port at all.
+      - "127.0.0.1:9050:9050"
+    volumes:
+      - arti-data:/var/lib/arti
+      # Bridges (optional): create /opt/torproxy/bridges.toml on the host first
+      # with sudoedit, so root owns it, and chmod 0644 (format in arti.toml); a
+      # file owned by any other user makes Arti exit with "Bad owner". Then
+      # uncomment. create_host_path: false makes a missing file fail the deploy
+      # instead of Docker creating a directory.
+      # - type: bind
+      #   source: /opt/torproxy/bridges.toml
+      #   target: /etc/arti/arti.d/bridges.toml
+      #   read_only: true
+      #   bind:
+      #     create_host_path: false
+    networks:
+      - torproxy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+volumes:
+  arti-data:
+
+networks:
+  torproxy:
+    # Fixed name so other stacks can join it as an external network and reach
+    # the proxy at socks5h://torproxy:9050.
+    name: torproxy

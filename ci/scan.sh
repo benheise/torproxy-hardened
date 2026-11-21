@@ -27,9 +27,13 @@ cache=${SCAN_CACHE:-$HOME/.cache/torproxy-scan}
 mkdir -p "$cache/trivy" "$cache/grype"
 
 sock=/var/run/docker.sock
+# Scanners run as the calling user (so output files are theirs), with the
+# Docker socket's group for image access and a private writable /tmp: some
+# scanner images' /tmp is writable only by root (grype then fails to fetch its
+# DB and to unpack the image).
 args=(--rm --network host
   -u "$(id -u):$(id -g)" --group-add "$(stat -c %g "$sock")"
-  -v "$sock:$sock:ro" -v "$out:/out" -e HOME=/tmp)
+  -v "$sock:$sock:ro" -v "$out:/out" --tmpfs "/tmp:rw,mode=1777" -e HOME=/tmp)
 # Pass a proxy and CA bundle through when the host uses them (no-ops in CI).
 for v in HTTPS_PROXY https_proxy NO_PROXY no_proxy; do
   [[ -n "${!v:-}" ]] && args+=(-e "$v")
@@ -50,11 +54,11 @@ done
 
 echo "== grype"
 docker run "${args[@]}" -v "$cache/grype:/cache" -e GRYPE_DB_CACHE_DIR=/cache "$GRYPE_IMAGE" \
-  "docker:$image" --quiet -o json=/out/grype.json -o sarif=/out/grype.sarif
+  "docker:$image" -o json=/out/grype.json -o sarif=/out/grype.sarif
 
 echo "== syft"
 docker run "${args[@]}" "$SYFT_IMAGE" \
-  "docker:$image" --quiet -o spdx-json=/out/sbom.spdx.json -o cyclonedx-json=/out/sbom.cdx.json
+  "docker:$image" -o spdx-json=/out/sbom.spdx.json -o cyclonedx-json=/out/sbom.cdx.json
 
 for f in trivy.json trivy.sarif trivy.cosign-vuln.json grype.json grype.sarif sbom.spdx.json sbom.cdx.json; do
   [[ -s "$out/$f" ]] || { echo "scan.sh: missing $out/$f" >&2; exit 1; }
